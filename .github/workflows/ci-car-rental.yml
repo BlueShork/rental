@@ -8,9 +8,13 @@ on:
       - '.github/workflows/ci-car-rental.yml'
   pull_request:
     branches: [ main, develop ]
-    paths:
-      - 'apps/car-rental-service/**'
-      - '.github/workflows/ci-car-rental.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -21,8 +25,9 @@ jobs:
   # Phase 1: Tests & Code Quality
   # ============================================
   test:
-    name: Unit & Integration Tests
+    name: Java tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       checks: write
@@ -48,11 +53,13 @@ jobs:
         with:
           name: test-results
           path: apps/car-rental-service/build/test-results/
+          retention-days: 7
 
   # Code quality checks
   code-quality:
-    name: Code Quality & Security Scans
+    name: Java quality
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
       - name: Checkout code
@@ -71,6 +78,18 @@ jobs:
         working-directory: apps/car-rental-service
         run: ./gradlew build -x test
       
+      - name: Run Checkstyle
+        working-directory: apps/car-rental-service
+        run: ./gradlew checkstyleMain checkstyleTest
+
+      - name: Upload Checkstyle reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-checkstyle-reports
+          path: apps/car-rental-service/build/reports/checkstyle/
+          retention-days: 7
+
       - name: Check for secrets
         uses: gitleaks/gitleaks-action@v2
         env:
@@ -80,8 +99,9 @@ jobs:
   # Phase 2: Build & Push Docker Image
   # ============================================
   build-and-push:
-    name: Build & Push Docker Image
+    name: Java Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [test, code-quality]
     
     permissions:
@@ -97,6 +117,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
       
       - name: Log in to Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -123,7 +144,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
       
       - name: Scan Docker image with Trivy
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -144,6 +165,7 @@ jobs:
   pipeline-status:
     name: Pipeline Status
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [test, code-quality, build-and-push]
     if: always()
     
